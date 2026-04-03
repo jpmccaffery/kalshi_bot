@@ -10,14 +10,15 @@ import logging
 from src.config import RiskConfig
 from src.execution.base import Executor
 from src.kalshi.client import KalshiClient
-from src.kalshi.models import Fill, Market, OrderAction, Side, Signal
+from src.kalshi.models import Fill, Market, Signal
+from src.portfolio import Portfolio
 
 logger = logging.getLogger(__name__)
 
 
 class LiveTrader(Executor):
-    def __init__(self, risk: RiskConfig, client: KalshiClient):
-        super().__init__(risk)
+    def __init__(self, risk: RiskConfig, portfolio: Portfolio, client: KalshiClient):
+        super().__init__(risk, portfolio)
         self._client = client
 
     def _execute(self, signals: list[Signal], markets: dict[str, Market]) -> list[Fill]:
@@ -42,12 +43,13 @@ class LiveTrader(Executor):
                 )
                 fills.append(fill)
                 logger.info(
-                    "[LIVE] %s %s %s x%d @ %dc | order_id=%s",
+                    "[LIVE] %s %s %s x%d @ %dc  kelly=%.3f  order_id=%s",
                     fill.action.value.upper(),
                     fill.side.value.upper(),
                     fill.ticker,
                     fill.quantity,
                     fill.price,
+                    signal.kelly_fraction,
                     order.get("order_id", "?"),
                 )
             except Exception as e:

@@ -1,20 +1,20 @@
 """
 Null strategy — never trades.
 
-Useful for validating the plumbing end-to-end: it will log the market state
-it receives each iteration without placing any orders.
+Logs the market state each iteration but returns no estimates, so the sizer
+produces no signals. Useful for validating the plumbing end-to-end.
 """
 
 import logging
 
-from src.kalshi.models import Market, Signal
+from src.kalshi.models import EdgeEstimate, Market
 from src.strategies.base import Strategy
 
 logger = logging.getLogger(__name__)
 
 
 class NullStrategy(Strategy):
-    def generate_signals(self, markets: dict[str, Market]) -> list[Signal]:
+    def estimate_edge(self, markets: dict[str, Market]) -> list[EdgeEstimate]:
         for ticker, market in markets.items():
             logger.info(
                 "[%s] %s | yes_bid=%dc yes_ask=%dc mid=%.1fc | volume=%d oi=%d",

@@ -1,8 +1,9 @@
 """
 Paper trader — simulates order execution against live market data.
 
-Fills are assumed at the current mid price (optimistic but simple). Tracks
-positions and running P&L, and appends each fill to logs/paper_fills.csv.
+Fills at the signal's limit_price, or mid price for market orders.
+Portfolio state (positions, balance, P&L) is managed by the shared Portfolio.
+Each fill is appended to logs/paper_fills.csv.
 """
 
 import csv
@@ -12,20 +13,18 @@ from datetime import datetime, timezone
 
 from src.config import RiskConfig
 from src.execution.base import Executor
-from src.kalshi.models import Fill, Market, OrderAction, Position, Side, Signal
+from src.kalshi.models import Fill, Market, Side, Signal
+from src.portfolio import Portfolio
 
 logger = logging.getLogger(__name__)
 
 FILLS_LOG = "logs/paper_fills.csv"
-_CSV_HEADERS = ["timestamp", "ticker", "side", "action", "quantity", "price_cents", "pnl_cents"]
+_CSV_HEADERS = ["timestamp", "ticker", "side", "action", "quantity", "price_cents", "kelly_fraction"]
 
 
 class PaperTrader(Executor):
-    def __init__(self, risk: RiskConfig, starting_balance_cents: int = 100_000):
-        super().__init__(risk)
-        self.balance_cents = starting_balance_cents
-        self.positions: dict[str, Position] = {}
-        self.fills: list[Fill] = []
+    def __init__(self, risk: RiskConfig, portfolio: Portfolio):
+        super().__init__(risk, portfolio)
         os.makedirs("logs", exist_ok=True)
         self._init_csv()
 
@@ -51,19 +50,18 @@ class PaperTrader(Executor):
                 price=fill_price,
                 timestamp=datetime.now(timezone.utc).isoformat(),
             )
-            pnl = self._update_position(fill)
-            self._update_balance(fill, pnl)
-            self._log_fill(fill, pnl)
+            self._log_fill(fill, signal.kelly_fraction)
             fills.append(fill)
 
             logger.info(
-                "[PAPER] %s %s %s x%d @ %dc | balance=$%.2f",
+                "[PAPER] %s %s %s x%d @ %dc  kelly=%.3f  balance=$%.2f",
                 fill.action.value.upper(),
                 fill.side.value.upper(),
                 fill.ticker,
                 fill.quantity,
                 fill.price,
-                self.balance_cents / 100,
+                signal.kelly_fraction,
+                self.portfolio.balance_cents / 100,
             )
 
         return fills
@@ -71,57 +69,17 @@ class PaperTrader(Executor):
     def _fill_price(self, signal: Signal, market: Market) -> int:
         if signal.limit_price is not None:
             return signal.limit_price
-        # Fill at mid price for market orders
         if signal.side == Side.YES:
             return round(market.yes_mid)
         return round(market.no_mid)
 
-    def _update_position(self, fill: Fill) -> int:
-        """Update position and return realized P&L in cents (positive = profit)."""
-        pos = self.positions.setdefault(fill.ticker, Position(ticker=fill.ticker))
-        pnl = 0
-
-        if fill.side == Side.YES:
-            if fill.action == OrderAction.BUY:
-                pos.yes_quantity += fill.quantity
-            else:
-                closed = min(fill.quantity, pos.yes_quantity)
-                pos.yes_quantity -= closed
-                # Simplified: realized pnl tracked externally; here we record cost basis delta
-                pnl = (fill.price - 50) * closed  # rough proxy
-                pos.realized_pnl_cents += pnl
-        else:
-            if fill.action == OrderAction.BUY:
-                pos.no_quantity += fill.quantity
-            else:
-                closed = min(fill.quantity, pos.no_quantity)
-                pos.no_quantity -= closed
-                pnl = (fill.price - 50) * closed
-                pos.realized_pnl_cents += pnl
-
-        if pnl < 0:
-            self.record_loss(-pnl)
-        return pnl
-
-    def _update_balance(self, fill: Fill, pnl: int) -> None:
-        cost = fill.price * fill.quantity
-        if fill.action == OrderAction.BUY:
-            self.balance_cents -= cost
-        else:
-            self.balance_cents += cost
-
-    def _log_fill(self, fill: Fill, pnl: int) -> None:
+    def _log_fill(self, fill: Fill, kelly_fraction: float) -> None:
         with open(FILLS_LOG, "a", newline="") as f:
             csv.writer(f).writerow([
                 fill.timestamp, fill.ticker, fill.side.value,
-                fill.action.value, fill.quantity, fill.price, pnl,
+                fill.action.value, fill.quantity, fill.price, f"{kelly_fraction:.4f}",
             ])
 
     def summary(self) -> None:
         logger.info("=== Paper Trading Summary ===")
-        logger.info("Balance: $%.2f", self.balance_cents / 100)
-        for ticker, pos in self.positions.items():
-            logger.info(
-                "  %s: YES=%d NO=%d realized_pnl=$%.2f",
-                ticker, pos.yes_quantity, pos.no_quantity, pos.realized_pnl_cents / 100,
-            )
+        self.portfolio.summary()

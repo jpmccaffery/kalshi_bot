@@ -7,21 +7,15 @@ def make_market(ticker="TEST", yes_bid=40, yes_ask=60) -> Market:
                   yes_bid=yes_bid, yes_ask=yes_ask, volume=0, open_interest=0)
 
 
-def test_returns_no_signals():
+def test_returns_no_estimates():
     strategy = NullStrategy()
-    markets = {"TEST": make_market()}
-    assert strategy.generate_signals(markets) == []
+    assert strategy.estimate_edge({"TEST": make_market()}) == []
 
 
 def test_handles_empty_markets():
-    strategy = NullStrategy()
-    assert strategy.generate_signals({}) == []
+    assert NullStrategy().estimate_edge({}) == []
 
 
 def test_handles_multiple_markets():
-    strategy = NullStrategy()
-    markets = {
-        "TICKER-A": make_market("TICKER-A"),
-        "TICKER-B": make_market("TICKER-B"),
-    }
-    assert strategy.generate_signals(markets) == []
+    markets = {"A": make_market("A"), "B": make_market("B")}
+    assert NullStrategy().estimate_edge(markets) == []

@@ -8,7 +8,9 @@ from src.config import load_config
 from src.data.base import KalshiDataFeed
 from src.execution.paper_trader import PaperTrader
 from src.execution.live_trader import LiveTrader
+from src.execution.sizer import KellySizer
 from src.kalshi.client import KalshiClient
+from src.portfolio import Portfolio
 
 logging.basicConfig(
     level=logging.INFO,
@@ -31,9 +33,7 @@ def _shutdown(signum, frame):
 
 
 def _load_strategy(name: str):
-    """Dynamically load a strategy by module name from src/strategies/."""
     module = importlib.import_module(f"src.strategies.{name}")
-    # Convention: class name is CamelCase of the module name
     class_name = "".join(part.capitalize() for part in name.split("_"))
     return getattr(module, class_name)()
 
@@ -53,15 +53,14 @@ def main():
     )
     feed = KalshiDataFeed(client)
     strategy = _load_strategy(config.trading.strategy)
+    sizer = KellySizer(risk=config.risk)
+    portfolio = Portfolio(balance_cents=config.execution.paper_starting_balance_cents)
 
     if config.execution.mode == "live":
         logger.warning("LIVE TRADING ENABLED — real orders will be placed")
-        executor = LiveTrader(risk=config.risk, client=client)
+        executor = LiveTrader(risk=config.risk, portfolio=portfolio, client=client)
     else:
-        executor = PaperTrader(
-            risk=config.risk,
-            starting_balance_cents=config.execution.paper_starting_balance_cents,
-        )
+        executor = PaperTrader(risk=config.risk, portfolio=portfolio)
 
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)
@@ -75,9 +74,11 @@ def main():
             if not markets:
                 logger.warning("No market data returned — check your tickers in config.yaml")
             else:
-                signals = strategy.generate_signals(markets)
-                if signals:
-                    executor.execute(signals, markets)
+                estimates = strategy.estimate_edge(markets)
+                if estimates:
+                    signals = sizer.size(estimates, markets, portfolio)
+                    if signals:
+                        executor.execute(signals, markets)
         except Exception as e:
             logger.error("Error in main loop: %s", e, exc_info=True)
 
