@@ -1,11 +1,15 @@
 kalshi:
   environment: demo  # demo | production
 
+logging:
+  level: DEBUG  # DEBUG | INFO | WARNING | ERROR
+
 trading:
-  strategy: null_strategy
-  # List market tickers to watch. Find tickers at https://kalshi.com/markets
+  strategy: weather_strategy
   markets:
-    - KXNCAABBGAME-26APR031400CIBOSC-OSC # example — replace with real tickers
+    - KXTEMPNYCH-26APR0319-T65.99
+    - KXTEMPNYCH-26APR0319-T66.99
+    - KXTEMPNYCH-26APR0319-T67.99
   loop_interval_seconds: 30
 
 risk:
@@ -14,5 +18,5 @@ risk:
   max_daily_loss_cents: 5000     # $50 — paper mode: simulated; live mode: enforced
 
 execution:
-  mode: paper  # paper | live
+  mode: demo  # paper | demo | live
   paper_starting_balance_cents: 100000  # $1,000 starting paper balance

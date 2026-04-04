@@ -44,11 +44,17 @@ class ExecutionConfig:
 
 
 @dataclass
+class LoggingConfig:
+    level: str = "INFO"
+
+
+@dataclass
 class Config:
     kalshi: KalshiConfig
     trading: TradingConfig
     risk: RiskConfig
     execution: ExecutionConfig
+    logging: LoggingConfig
 
 
 def load_config(path: str = "config.yaml") -> Config:
@@ -82,4 +88,9 @@ def load_config(path: str = "config.yaml") -> Config:
         paper_starting_balance_cents=exec_raw.get("paper_starting_balance_cents", 100_000),
     )
 
-    return Config(kalshi=kalshi, trading=trading, risk=risk, execution=execution)
+    logging_raw = raw.get("logging", {})
+    logging = LoggingConfig(
+        level=logging_raw.get("level", "INFO"),
+    )
+
+    return Config(kalshi=kalshi, trading=trading, risk=risk, execution=execution, logging=logging)

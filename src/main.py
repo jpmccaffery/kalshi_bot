@@ -12,16 +12,20 @@ from src.execution.sizer import KellySizer
 from src.kalshi.client import KalshiClient
 from src.portfolio import Portfolio
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)-8s %(name)s — %(message)s",
-    datefmt="%Y-%m-%dT%H:%M:%S",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler("logs/bot.log"),
-    ],
-)
 logger = logging.getLogger(__name__)
+
+
+def _configure_logging(level_str: str) -> None:
+    level = getattr(logging, level_str.upper(), logging.INFO)
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)-8s %(name)s — %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+        handlers=[
+            logging.StreamHandler(sys.stdout),
+            logging.FileHandler("logs/bot.log"),
+        ],
+    )
 
 _running = True
 
@@ -43,6 +47,7 @@ def main():
     os.makedirs("logs", exist_ok=True)
 
     config = load_config("config.yaml")
+    _configure_logging(config.logging.level)
     logger.info("Starting kalshi_bot | env=%s mode=%s strategy=%s",
                 config.kalshi.environment, config.execution.mode, config.trading.strategy)
 
@@ -57,7 +62,10 @@ def main():
     portfolio = Portfolio(balance_cents=config.execution.paper_starting_balance_cents)
 
     if config.execution.mode == "live":
-        logger.warning("LIVE TRADING ENABLED — real orders will be placed")
+        logger.warning("LIVE TRADING ENABLED — real orders will be placed on PRODUCTION")
+        executor = LiveTrader(risk=config.risk, portfolio=portfolio, client=client)
+    elif config.execution.mode == "demo":
+        logger.info("Demo trading enabled — real orders will be placed on DEMO (fake money)")
         executor = LiveTrader(risk=config.risk, portfolio=portfolio, client=client)
     else:
         executor = PaperTrader(risk=config.risk, portfolio=portfolio)
