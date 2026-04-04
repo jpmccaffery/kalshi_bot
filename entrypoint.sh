@@ -2,7 +2,7 @@
 # Exit immediately if a command exits with a non-zero status
 set -e
 
-echo "--- Starting Euclid Environment Setup ---"
+echo "--- Starting Kalshi Environment Setup ---"
 
 # 1. Install the volume-mounted code as an editable package.
 # This searches for the pyproject.toml in /app (your volume).

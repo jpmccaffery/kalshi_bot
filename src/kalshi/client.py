@@ -27,6 +27,9 @@ class KalshiClient:
     def __init__(self, base_url: str, api_key_id: str, private_key_path: str):
         self.base_url = base_url.rstrip("/")
         self.api_key_id = api_key_id
+        # Path prefix to include in the signature (e.g. "/trade-api/v2")
+        from urllib.parse import urlparse
+        self._path_prefix = urlparse(self.base_url).path
         self._private_key = None
 
         if private_key_path:
@@ -43,7 +46,7 @@ class KalshiClient:
             return {}
 
         timestamp_ms = str(int(time.time() * 1000))
-        message = (timestamp_ms + method.upper() + path).encode()
+        message = (timestamp_ms + method.upper() + self._path_prefix + path).encode()
         signature = self._private_key.sign(message, padding.PKCS1v15(), hashes.SHA256())
         sig_b64 = base64.b64encode(signature).decode()
 

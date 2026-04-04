@@ -5,8 +5,8 @@ trading:
   strategy: null_strategy
   # List market tickers to watch. Find tickers at https://kalshi.com/markets
   markets:
-    - KXBTCD-25DEC31-T100000  # example — replace with real tickers
-  loop_interval_seconds: 60
+    - KXNCAABBGAME-26APR031400CIBOSC-OSC # example — replace with real tickers
+  loop_interval_seconds: 30
 
 risk:
   max_contracts_per_market: 10   # max open contracts on any single market
