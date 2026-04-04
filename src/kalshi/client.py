@@ -101,6 +101,12 @@ class KalshiClient:
             close_time=m.get("close_time"),
         )
 
+    def list_markets(self, status: str = "open", limit: int = 100, cursor: Optional[str] = None) -> dict:
+        params: dict = {"status": status, "limit": limit}
+        if cursor:
+            params["cursor"] = cursor
+        return self._get("/markets", params=params)
+
     def get_markets(self, tickers: list[str]) -> list[Market]:
         markets = []
         for ticker in tickers:
