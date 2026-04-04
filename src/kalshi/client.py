@@ -80,6 +80,13 @@ class KalshiClient:
 
     # --------------------------------------------------------- market data
 
+    @staticmethod
+    def _dollars_to_cents(val: str, default: int) -> int:
+        try:
+            return round(float(val) * 100)
+        except (TypeError, ValueError):
+            return default
+
     def get_market(self, ticker: str) -> Market:
         data = self._get(f"/markets/{ticker}")
         m = data["market"]
@@ -87,8 +94,8 @@ class KalshiClient:
             ticker=m["ticker"],
             title=m["title"],
             status=m["status"],
-            yes_bid=m.get("yes_bid", 0),
-            yes_ask=m.get("yes_ask", 100),
+            yes_bid=self._dollars_to_cents(m.get("yes_bid_dollars"), 0),
+            yes_ask=self._dollars_to_cents(m.get("yes_ask_dollars"), 100),
             volume=m.get("volume", 0),
             open_interest=m.get("open_interest", 0),
             close_time=m.get("close_time"),
