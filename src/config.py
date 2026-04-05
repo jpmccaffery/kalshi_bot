@@ -15,7 +15,7 @@ class KalshiConfig:
 
     BASE_URLS = {
         "demo": "https://demo-api.kalshi.co/trade-api/v2",
-        "production": "https://trading-api.kalshi.com/trade-api/v2",
+        "production": "https://api.elections.kalshi.com/trade-api/v2",
     }
 
     @property
@@ -31,9 +31,18 @@ class RiskConfig:
 
 
 @dataclass
+class UniverseConfig:
+    window_hours: int = 12                          # close-time window to discover markets
+    refresh_interval_seconds: int = 3600            # how often to re-run discovery
+    min_volume: int = 100                           # all-time volume floor
+    max_spread_cents: int = 20                      # max yes_ask - yes_bid
+    exclude_prefixes: list[str] = field(default_factory=lambda: ["KXMVE"])
+    series_whitelist: list[str] = field(default_factory=list)   # empty = all series
+
+
+@dataclass
 class TradingConfig:
     strategy: str = "null_strategy"
-    markets: list[str] = field(default_factory=list)
     loop_interval_seconds: int = 60
 
 
@@ -51,6 +60,7 @@ class LoggingConfig:
 @dataclass
 class Config:
     kalshi: KalshiConfig
+    universe: UniverseConfig
     trading: TradingConfig
     risk: RiskConfig
     execution: ExecutionConfig
@@ -68,10 +78,19 @@ def load_config(path: str = "config.yaml") -> Config:
         api_private_key_path=os.environ.get("KALSHI_API_PRIVATE_KEY_PATH", ""),
     )
 
+    universe_raw = raw.get("universe", {})
+    universe = UniverseConfig(
+        window_hours=universe_raw.get("window_hours", 12),
+        refresh_interval_seconds=universe_raw.get("refresh_interval_seconds", 3600),
+        min_volume=universe_raw.get("min_volume", 100),
+        max_spread_cents=universe_raw.get("max_spread_cents", 20),
+        exclude_prefixes=universe_raw.get("exclude_prefixes", ["KXMVE"]),
+        series_whitelist=universe_raw.get("series_whitelist", []),
+    )
+
     trading_raw = raw.get("trading", {})
     trading = TradingConfig(
         strategy=trading_raw.get("strategy", "null_strategy"),
-        markets=trading_raw.get("markets", []),
         loop_interval_seconds=trading_raw.get("loop_interval_seconds", 60),
     )
 
@@ -93,4 +112,4 @@ def load_config(path: str = "config.yaml") -> Config:
         level=logging_raw.get("level", "INFO"),
     )
 
-    return Config(kalshi=kalshi, trading=trading, risk=risk, execution=execution, logging=logging)
+    return Config(kalshi=kalshi, universe=universe, trading=trading, risk=risk, execution=execution, logging=logging)

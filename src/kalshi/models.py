@@ -28,6 +28,10 @@ class Market:
     volume: int
     open_interest: int
     close_time: Optional[str] = None
+    series_ticker: Optional[str] = None
+    event_ticker: Optional[str] = None
+    volume_24h: int = 0                # contracts traded in last 24h
+    liquidity_cents: int = 0           # total resting liquidity in cents
 
     @property
     def no_bid(self) -> int:
