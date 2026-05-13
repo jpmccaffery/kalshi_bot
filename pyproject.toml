@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kalshi-bot"
+version = "0.1.0"
+description = "Kalshi prediction-market trading bot built on trading_bot framework"
+requires-python = ">=3.11"
+dependencies = [
+    "requests",
+    "cryptography",
+    "pandas",
+    "numpy",
+    "python-dotenv",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "integration: requires live Kalshi credentials",
+]

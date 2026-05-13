@@ -6,3 +6,8 @@ __pycache__/
 .DS_Store
 .secrets
 *egg-info
+demo_input
+demo_output
+output
+*.csv
+*.log

@@ -1,124 +1,159 @@
 # kalshi_bot
 
-Automated trading bot for [Kalshi](https://kalshi.com) prediction markets. Runs in Docker with a pluggable strategy and data-feed architecture. Starts in paper-trading mode (simulated fills, no real orders).
+Automated trading bot for [Kalshi](https://kalshi.com) prediction markets, built on the `trading_bot` framework. Runs entirely in Docker. Defaults to paper trading (dry run, no real orders placed).
 
 ---
 
-## Project structure
+## Prerequisites
 
-```
-src/
-├── main.py                  # main loop — wires everything together
-├── config.py                # loads config.yaml + .env
-├── kalshi/
-│   ├── client.py            # REST API client with RSA auth
-│   └── models.py            # Market, Signal, Fill, Position data classes
-├── data/
-│   └── base.py              # DataFeed interface + KalshiDataFeed
-├── strategies/
-│   ├── base.py              # Strategy interface
-│   └── null_strategy.py    # logs markets, never trades (default)
-└── execution/
-    ├── base.py              # Executor interface + risk controls
-    ├── paper_trader.py      # simulates fills, logs to logs/paper_fills.csv
-    └── live_trader.py       # places real orders (off by default)
-
-tests/
-├── test_models.py
-├── test_config.py
-├── test_null_strategy.py
-├── test_paper_trader.py
-├── test_risk_controls.py
-└── test_data_feed.py
-```
+- Docker and Docker Compose installed
+- The `trading_bot` repo cloned as a sibling directory:
+  ```
+  projects/
+  ├── trading_bot/   ← framework (must exist)
+  └── kalshi_bot/    ← this repo
+  ```
+- A Kalshi API key (see [Credentials](#credentials) below)
 
 ---
 
-## Setup
+## Credentials
 
-### 1. Kalshi API credentials
-
-Generate an RSA key pair and register the public key at https://kalshi.com/account/api:
+Generate an RSA-2048 key pair and register the public key at https://kalshi.com/account/api:
 
 ```bash
 openssl genrsa -out kalshi_private.pem 2048
 openssl rsa -in kalshi_private.pem -pubout -out kalshi_public.pem
 ```
 
-Copy `.env.example` to `.env` and fill in your Key ID and private key path:
+Copy `.env.example` to `.env` and fill in your credentials:
 
 ```bash
 cp .env.example .env
 ```
 
-### 2. Configure markets and strategy
+Key variables:
 
-Edit `config.yaml`:
+| Variable | Description |
+|---|---|
+| `KALSHI_API_KEY_ID` | Key ID from the Kalshi dashboard |
+| `KALSHI_API_PRIVATE_KEY_PATH` | Absolute path to your `kalshi_private.pem` |
+| `KALSHI_DEMO` | `true` for demo API, `false` for live (default: `true`) |
+| `KALSHI_MARKETS` | Comma-separated tickers, e.g. `KXINX-24,KXETHD-24` |
+| `KALSHI_MARKET_PATTERN` | Regex alternative to `KALSHI_MARKETS`, e.g. `^KXINX-` |
+| `TRADING_DRY_RUN` | `true` to skip real order submission (default: `true`) |
 
-- Set `kalshi.environment` to `demo` or `production`
-- Add market tickers to `trading.markets` (find them at https://kalshi.com/markets)
-- Set `trading.strategy` to the module name of your strategy (e.g. `null_strategy`)
-- Adjust `risk` limits as needed
-- Set `execution.mode` to `paper` (default) or `live`
+---
 
-### 3. Build the image
+## Build the image
+
+Run once, and again any time `docker/requirements.txt` or the `Dockerfile` changes:
 
 ```bash
-cd docker
-docker compose build
+docker compose -f docker/docker-compose.yaml build
 ```
 
 ---
 
-## Running the bot
+## Drop into an interactive shell
+
+The fastest way to explore, run scripts, or debug:
 
 ```bash
-cd docker
-docker compose up kalshi_bot
+docker compose -f docker/docker-compose.yaml run --rm --entrypoint bash kalshi_bot
 ```
 
-The bot polls the configured markets every `loop_interval_seconds`, passes market data to the active strategy, and routes any signals through the executor. In paper mode, fills are simulated and logged to `logs/paper_fills.csv`. To stop cleanly, send SIGINT (`Ctrl+C`) or `docker compose stop`.
+You'll land at `/app` with both `kalshi_bot` and `trading_bot` source trees live-mounted — edits on your host are reflected immediately, no rebuild needed.
 
 ---
 
-## Running tests
+## Run the bot
 
 ```bash
-cd docker
-docker compose run --rm test
+docker compose -f docker/docker-compose.yaml run --rm kalshi_bot
 ```
 
-The `test` service mounts `src/` and `tests/` from your local machine, so changes to those directories are reflected immediately — no rebuild required. Only rebuild if you change `requirements.txt` or the `Dockerfile`:
+Flags (append after `kalshi_bot`):
+
+| Flag | Description |
+|---|---|
+| `--dry-run` | Override `.env`, skip real order submission |
+| `--once` | Run one tick then exit (useful for testing) |
+| `--output DIR` | Directory for CSV/PNG run output (default: `./output`) |
+
+Example — one tick, dry run, custom output dir:
 
 ```bash
-docker compose build
+docker compose -f docker/docker-compose.yaml run --rm kalshi_bot --once --dry-run --output /app/output
 ```
 
 ---
 
-## Adding a strategy
+## Run the tests
 
-1. Create `src/strategies/my_strategy.py` with a class `MyStrategy` that extends `Strategy`:
-
-```python
-from src.kalshi.models import Market, Signal
-from src.strategies.base import Strategy
-
-class MyStrategy(Strategy):
-    def generate_signals(self, markets: dict[str, Market]) -> list[Signal]:
-        # your logic here
-        return []
+```bash
+docker compose -f docker/docker-compose.yaml run --rm test
 ```
 
-2. Set `trading.strategy: my_strategy` in `config.yaml`.
-
-The strategy receives a fresh market snapshot each iteration and returns a list of `Signal` objects. Risk controls (position limits, daily loss cap) are applied by the executor before any order is placed.
+Source and tests are live-mounted, so no rebuild is needed after editing `src/` or `tests/`. Only rebuild if `docker/requirements.txt` or the `Dockerfile` changes.
 
 ---
 
-## Going live
+## Utility scripts
 
-1. Run in paper mode until you are confident in the strategy's behavior.
-2. Set `execution.mode: live` in `config.yaml`.
-3. Ensure `kalshi.environment: production` and your `.env` points to a valid production API key.
-4. Start with conservative `risk` limits.
+Run from inside the interactive shell (`cd /app`):
+
+### List series (top-level groupings)
+
+```bash
+python scripts/list_series.py
+python scripts/list_series.py --output series.csv
+python scripts/list_series.py --live --output series.csv
+```
+
+### List events (question instances within a series)
+
+```bash
+python scripts/list_events.py
+python scripts/list_events.py --series KXINX
+python scripts/list_events.py --series KXINX --output events.csv
+```
+
+### List markets (tradeable contracts)
+
+```bash
+python scripts/list_markets.py
+python scripts/list_markets.py --series KXINX
+python scripts/list_markets.py --series KXINX --output markets.csv
+
+# Print tickers only — useful for building KALSHI_MARKETS in .env:
+python scripts/list_markets.py --series KXINX --tickers-only
+```
+
+All scripts default to the demo API. Pass `--live` to hit the live endpoint, or `--demo` to force demo regardless of `KALSHI_DEMO` in `.env`.
+
+---
+
+## Project layout
+
+```
+kalshi_bot/
+├── src/kalshi_bot/
+│   ├── auth.py          # RSA-SHA256 request signing
+│   ├── client.py        # KalshiTradingClient (order placement, balance, positions)
+│   ├── config.py        # BotConfig factory — reads environment variables
+│   ├── data_feed.py     # KalshiDataFeed + resolve_symbols()
+│   ├── recommender.py   # ProbMeanReversionRecommender
+│   └── run.py           # CLI entry point
+├── scripts/
+│   ├── _kalshi_api.py   # Shared auth + pagination helpers
+│   ├── list_series.py
+│   ├── list_events.py
+│   └── list_markets.py
+├── tests/
+├── docker/
+│   ├── Dockerfile
+│   ├── docker-compose.yaml
+│   └── requirements.txt
+└── .env.example
+```
