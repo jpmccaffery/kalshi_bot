@@ -50,19 +50,22 @@ class TestPlaceLimitOrder:
     def test_buy_order_returns_filled(self, client):
         resp_data = {
             "order": {
-                "status": "filled",
-                "filled_count": 10,
-                "yes_price": 55,
+                "status":                  "executed",
+                "fill_count_fp":           "10.00",
+                "taker_fill_cost_dollars": "0.5500",
+                "maker_fill_cost_dollars": "0.0000",
+                "taker_fees_dollars":      "0.0346",
+                "maker_fees_dollars":      "0.0000",
             }
         }
         with patch("requests.request", return_value=_mock_response(resp_data)):
             result = client.place_limit_order(_order())
         assert result.status == "filled"
         assert result.filled_qty == Decimal("10")
-        assert result.avg_fill_price == Decimal("0.55")
+        assert result.avg_fill_price == Decimal("0.055000")
 
     def test_resting_order_returns_partial(self, client):
-        resp_data = {"order": {"status": "resting", "filled_count": 0, "yes_price": 55}}
+        resp_data = {"order": {"status": "resting", "fill_count_fp": "0.00"}}
         with patch("requests.request", return_value=_mock_response(resp_data)):
             result = client.place_limit_order(_order())
         assert result.status == "partial"

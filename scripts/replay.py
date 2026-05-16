@@ -276,13 +276,20 @@ def compute_stats(results: list[dict]) -> dict:
     closed  = [r for r in results if r["result"] != "open"]
     yes     = [r for r in closed  if r["result"] == "yes"]
     returns = [r["return_pct"] for r in closed if r["return_pct"] is not None]
+    # cap_ret: (total_earned - total_deployed) / total_deployed
+    # With fixed $1/trade: total_deployed = n, dollar_pnl_i = return_pct_i / 100
+    # so cap_ret = mean(return_pct) — same as mean_ret for uniform trade sizes.
+    # With real varying sizes these would diverge; tracked separately for consistency.
+    n = len(returns)
+    cap_ret = sum(returns) / n if n else float("nan")
     return {
         "total":      len(results),
         "settled":    len(closed),
         "open":       len(results) - len(closed),
         "win_pct":    len(yes) / len(closed) * 100 if closed else float("nan"),
-        "mean_ret":   sum(returns) / len(returns) if returns else float("nan"),
-        "median_ret": sorted(returns)[len(returns) // 2] if returns else float("nan"),
+        "cap_ret":    cap_ret,
+        "mean_ret":   sum(returns) / n if n else float("nan"),
+        "median_ret": sorted(returns)[n // 2] if n else float("nan"),
         "sum_ret":    sum(returns),
     }
 
@@ -357,7 +364,7 @@ def main() -> None:
     }
 
     col = "{:12s} {:>5s} {:>6s} {:>7s} {:>5s} {:>7s} {:>9s} {:>9s} {:>9s}"
-    print(col.format("strategy", "N", "pos", "settled", "open", "win%", "mean_ret", "med_ret", "sum_ret"))
+    print(col.format("strategy", "N", "pos", "settled", "open", "win%", "cap_ret", "avg_ret", "med_ret"))
     print("-" * 82)
 
     def print_row(name: str, n_label: str, results: list[dict]) -> None:
@@ -366,9 +373,9 @@ def main() -> None:
             name, n_label,
             str(s["total"]), str(s["settled"]), str(s["open"]),
             fmt_pct(s["win_pct"]),
+            fmt_pct(s["cap_ret"]),
             fmt_pct(s["mean_ret"]),
             fmt_pct(s["median_ret"]),
-            fmt_pct(s["sum_ret"]),
         ))
 
     actual_results = simulate(signals_by_tick, settlements, n=None,

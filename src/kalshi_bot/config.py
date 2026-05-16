@@ -59,7 +59,7 @@ class _FutureOnlyCalendar(FixedScheduleCalendar):
 
 def load_env(env_path: str | Path | None = None) -> None:
     """Load .env file if present.  Safe to call even if .env doesn't exist."""
-    load_dotenv(dotenv_path=env_path, override=True)
+    load_dotenv(dotenv_path=env_path, override=False)
 
 
 def _require(name: str) -> str:
@@ -109,6 +109,12 @@ def build_bot_config(tz: ZoneInfo = ZoneInfo("UTC"),
     max_positions    = int(os.environ.get("TRADING_MAX_POSITIONS", "3"))
     paper_balance    = Decimal(os.environ.get("PAPER_BALANCE", "10000"))
     limit_padding    = Decimal(os.environ.get("TRADING_LIMIT_PADDING_CENTS", "1")) / 100
+    tick_minute      = int(os.environ.get("TRADING_TICK_MINUTE", "50"))
+
+    sides_raw     = os.environ.get("TRADING_SIDES", "yes,no")
+    allowed_sides = {s.strip() for s in sides_raw.split(",") if s.strip() in ("yes", "no")}
+    if not allowed_sides:
+        raise EnvironmentError("TRADING_SIDES must contain at least one of 'yes', 'no'")
 
     sizer_config = SizerConfig(
         fee_rate          = 0.035,      # Kalshi taker fee: 7¢×C×(1-C), ~3.5% at 50¢
@@ -151,13 +157,14 @@ def build_bot_config(tz: ZoneInfo = ZoneInfo("UTC"),
         min_edge       = 0.10,
         min_yes_ask    = 0.10,
         max_per_expiry = 1,
+        allowed_sides  = allowed_sides,
         output_dir     = output_dir,
     )
 
     bot_config = BotConfig(
         tz            = tz,
         calendar      = _FutureOnlyCalendar(
-                            times        = [__import__("datetime").time(h, 50) for h in range(24)],
+                            times        = [__import__("datetime").time(h, tick_minute) for h in range(24)],
                             start        = date.today(),
                             end          = date.today() + timedelta(days=30),
                             mode         = "live",

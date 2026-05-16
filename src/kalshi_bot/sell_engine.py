@@ -80,36 +80,57 @@ class ModelBasedSellEngine:
             if not symbol:
                 continue
 
-            model_prob = self._recommender.get_model_prob(symbol)
-            price_row  = price_map.get(symbol)
+            model_prob  = self._recommender.get_model_prob(symbol)
+            kalshi_side = self._recommender.get_position_side(symbol)
+            price_row   = price_map.get(symbol)
 
             if model_prob is None or price_row is None:
                 table.append(f"  {symbol:<40}  {'?':>6}  (no model/price data this tick — holding)")
                 continue
 
             yes_ask = float(price_row.get("yes_ask", float("nan")) or float("nan"))
-            yes_bid = float(price_row.get("yes_bid", 0) or 0)
 
-            if yes_bid <= 0 or yes_bid != yes_bid:
-                ask_s = f"{yes_ask:.3f}" if yes_ask == yes_ask else "  n/a"
+            if kalshi_side == "no":
+                no_bid   = float(price_row.get("no_bid", 0) or 0)
+                no_prob  = 1.0 - model_prob
+                if no_bid <= 0 or no_bid != no_bid:
+                    table.append(
+                        f"  {symbol:<40}  entry={entry_price:.3f}"
+                        f"  no_model={no_prob:.3f}  no_bid=n/a  → no bid, holding [NO]"
+                    )
+                    continue
+                fee      = taker_fee(no_bid)
+                net_sell = no_bid - fee
+                pnl_pct  = (no_bid - entry_price) / entry_price * 100 if entry_price else float("nan")
+                decision = "★SELL" if net_sell > no_prob else "hold"
+                table.append(
+                    f"  {symbol:<40}  entry={entry_price:.3f}"
+                    f"  no_bid={no_bid:.3f}  no_model={no_prob:.3f}"
+                    f"  net_sell={net_sell:.3f}  pnl={pnl_pct:+.1f}%  → {decision} [NO]"
+                )
+                if net_sell > no_prob:
+                    rows_to_sell.append((pos, "model_overpriced"))
+            else:
+                yes_bid = float(price_row.get("yes_bid", 0) or 0)
+                if yes_bid <= 0 or yes_bid != yes_bid:
+                    ask_s = f"{yes_ask:.3f}" if yes_ask == yes_ask else "  n/a"
+                    table.append(
+                        f"  {symbol:<40}  entry={entry_price:.3f}  ask={ask_s}"
+                        f"  bid=  n/a  model={model_prob:.3f}  → no bid, holding"
+                    )
+                    continue
+                fee      = taker_fee(yes_bid)
+                net_sell = yes_bid - fee
+                pnl_pct  = (yes_bid - entry_price) / entry_price * 100 if entry_price else float("nan")
+                ask_s    = f"{yes_ask:.3f}" if yes_ask == yes_ask else "  n/a"
+                decision = "★SELL" if net_sell > model_prob else "hold"
                 table.append(
                     f"  {symbol:<40}  entry={entry_price:.3f}  ask={ask_s}"
-                    f"  bid=  n/a  model={model_prob:.3f}  → no bid, holding"
+                    f"  bid={yes_bid:.3f}  model={model_prob:.3f}"
+                    f"  net_sell={net_sell:.3f}  pnl={pnl_pct:+.1f}%  → {decision}"
                 )
-                continue
-
-            fee      = taker_fee(yes_bid)
-            net_sell = yes_bid - fee
-            pnl_pct  = (yes_bid - entry_price) / entry_price * 100 if entry_price else float("nan")
-            ask_s    = f"{yes_ask:.3f}" if yes_ask == yes_ask else "  n/a"
-            decision = "★SELL" if net_sell > model_prob else "hold"
-            table.append(
-                f"  {symbol:<40}  entry={entry_price:.3f}  ask={ask_s}"
-                f"  bid={yes_bid:.3f}  model={model_prob:.3f}"
-                f"  net_sell={net_sell:.3f}  pnl={pnl_pct:+.1f}%  → {decision}"
-            )
-            if net_sell > model_prob:
-                rows_to_sell.append((pos, "model_overpriced"))
+                if net_sell > model_prob:
+                    rows_to_sell.append((pos, "model_overpriced"))
 
         logger.info("Open positions (%d):\n%s", len(positions), "\n".join(table))
 
@@ -145,7 +166,20 @@ class ModelBasedSellEngine:
                 if entry_bid != "" and entry_price else ""
             )
 
-            if model_prob is not None and yes_bid_raw > 0:
+            kalshi_side = self._recommender.get_position_side(symbol) if symbol else "yes"
+            if kalshi_side == "no":
+                no_bid_raw = float(price_row.get("no_bid", 0) or 0) if price_row is not None else 0
+                if model_prob is not None and no_bid_raw > 0:
+                    fee      = taker_fee(no_bid_raw)
+                    net_sell = no_bid_raw - fee
+                    no_prob  = 1.0 - model_prob
+                    pnl_pct  = round((no_bid_raw - entry_price) / entry_price * 100, 2) if entry_price else ""
+                    decision = "sell" if net_sell > no_prob else "hold"
+                else:
+                    net_sell = decision = ""
+                    pnl_pct  = ""
+                yes_bid_raw = no_bid_raw  # use no_bid for the CSV's yes_bid column
+            elif model_prob is not None and yes_bid_raw > 0:
                 fee      = taker_fee(yes_bid_raw)
                 net_sell = yes_bid_raw - fee
                 pnl_pct  = round((yes_bid_raw - entry_price) / entry_price * 100, 2) if entry_price else ""

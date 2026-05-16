@@ -112,11 +112,12 @@ def summarise_all() -> None:
     """Group by expiry date extracted from ticker and print one line per day."""
     expiry_re = re.compile(r"\d{2}[A-Z]{3}\d{2}")
 
-    cost_by_expiry : dict[str, float] = defaultdict(float)
-    pnl_by_expiry  : dict[str, float] = defaultdict(float)
-    yes_by_expiry  : dict[str, int]   = defaultdict(int)
-    no_by_expiry   : dict[str, int]   = defaultdict(int)
-    pos_by_expiry  : dict[str, int]   = defaultdict(int)
+    cost_by_expiry    : dict[str, float]       = defaultdict(float)
+    pnl_by_expiry     : dict[str, float]       = defaultdict(float)
+    yes_by_expiry     : dict[str, int]         = defaultdict(int)
+    no_by_expiry      : dict[str, int]         = defaultdict(int)
+    pos_by_expiry     : dict[str, int]         = defaultdict(int)
+    pos_returns       : dict[str, list[float]] = defaultdict(list)  # per-position pnl/cost
 
     for path in sorted(OUTPUT_DIR.glob("run_*/orders.csv")):
         with path.open() as f:
@@ -141,8 +142,12 @@ def summarise_all() -> None:
                 m   = expiry_re.search(sym)
                 if not m:
                     continue
-                exp = m.group()
-                pnl_by_expiry[exp] += float(row["pnl"])
+                exp  = m.group()
+                pnl  = float(row["pnl"])
+                cost = float(row.get("cost_basis") or 0)
+                pnl_by_expiry[exp] += pnl
+                if cost:
+                    pos_returns[exp].append(pnl / cost)
                 if row["result"] == "yes":
                     yes_by_expiry[exp] += 1
                 elif row["result"] == "no":
@@ -153,9 +158,10 @@ def summarise_all() -> None:
         print("No data found. (settlements.csv requires a new run to generate.)")
         return
 
-    print("\n%-10s %6s %8s %8s %5s %5s %6s %8s" % (
-        "EXPIRY", "pos", "cost", "net_pnl", "YES", "NO", "win%", "return%"))
-    print("-" * 70)
+    print("\n%-10s %6s %8s %8s %5s %5s %6s %9s %9s" % (
+        "EXPIRY", "pos", "cost", "net_pnl", "YES", "NO", "win%",
+        "cap_ret%", "avg_ret%"))
+    print("-" * 80)
 
     summary_rows = []
     for exp in all_expiries:
@@ -164,13 +170,16 @@ def summarise_all() -> None:
         y    = yes_by_expiry[exp]
         n    = no_by_expiry[exp]
         pos  = pos_by_expiry[exp]
-        settled = y + n
-        win_pct    = round(y / settled * 100, 1) if settled else None
-        return_pct = round(pnl / c * 100, 1)     if c       else None
-        win_str    = f"{win_pct:.0f}%" if win_pct is not None else "?"
-        ret_str    = f"{return_pct:+.1f}%" if return_pct is not None else "?"
-        print("%-10s %6d %8.0f %8.0f %5d %5d %6s %8s" % (
-            exp, pos, c, pnl, y, n, win_str, ret_str))
+        rets = pos_returns[exp]
+        settled    = y + n
+        win_pct    = round(y / settled * 100, 1)  if settled else None
+        cap_ret    = round(pnl / c * 100, 1)      if c       else None
+        avg_ret    = round(sum(rets) / len(rets) * 100, 1) if rets else None
+        win_str    = f"{win_pct:.0f}%"   if win_pct is not None else "?"
+        cap_str    = f"{cap_ret:+.1f}%"  if cap_ret is not None else "?"
+        avg_str    = f"{avg_ret:+.1f}%"  if avg_ret is not None else "?"
+        print("%-10s %6d %8.0f %8.0f %5d %5d %6s %9s %9s" % (
+            exp, pos, c, pnl, y, n, win_str, cap_str, avg_str))
         summary_rows.append({
             "expiry":     exp,
             "positions":  pos,
@@ -179,7 +188,8 @@ def summarise_all() -> None:
             "yes":        y,
             "no":         n,
             "win_pct":    win_pct,
-            "return_pct": return_pct,
+            "cap_ret_pct": cap_ret,
+            "avg_ret_pct": avg_ret,
         })
 
     out_path = OUTPUT_DIR / "daily_pnl.csv"

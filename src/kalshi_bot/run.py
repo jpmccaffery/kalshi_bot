@@ -93,6 +93,34 @@ def _append_ev_tick(
         })
 
 
+class _PrefixFilter(logging.Filter):
+    """Prepends a bracketed instance name to every log message.
+
+    Attached to handlers (not loggers) so it fires even for records that
+    reach the handler via propagation, bypassing parent-logger filter checks.
+    """
+    def __init__(self, prefix: str) -> None:
+        super().__init__()
+        self._prefix = prefix
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = self._prefix + str(record.msg)
+        return True
+
+
+def _apply_prefix_to_all_handlers(prefix: str) -> None:
+    """Add a prefix filter to every handler registered across all loggers."""
+    f = _PrefixFilter(prefix)
+    seen: set[int] = set()
+    for candidate in [logging.root] + list(logging.Logger.manager.loggerDict.values()):
+        if not isinstance(candidate, logging.Logger):
+            continue
+        for handler in candidate.handlers:
+            if id(handler) not in seen:
+                handler.addFilter(f)
+                seen.add(id(handler))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Kalshi trading bot")
     parser.add_argument(
@@ -105,7 +133,12 @@ def main() -> None:
     )
     parser.add_argument(
         "--output", default=str(OUTPUT_DIR),
-        help="Directory for run logs and CSV output",
+        help="Base directory for run logs and CSV output",
+    )
+    parser.add_argument(
+        "--name", default="",
+        help="Instance label (e.g. 'live', 'paper'). Also read from BOT_NAME env var. "
+             "Prefixes every log line and creates a named subdirectory under --output.",
     )
     args = parser.parse_args()
 
@@ -115,19 +148,32 @@ def main() -> None:
 
     load_env()
 
+    # Instance name: CLI arg takes precedence over env var
+    instance = args.name.strip() or os.environ.get("BOT_NAME", "").strip()
+
+    # If named, write into output/<name>/ so live and paper stay separate
+    output_dir = Path(args.output) / instance if instance else Path(args.output)
+
     tz         = ZoneInfo("UTC")
-    run_logger = RunLogger(base_dir=args.output, price_col="yes_bid")
+    run_logger = RunLogger(base_dir=str(output_dir), price_col="yes_bid")
     logger     = run_logger.log
+
+    # Inject prefix into every log record after RunLogger has set up handlers.
+    # Must target handlers (not loggers) because propagation skips parent filters.
+    if instance:
+        _apply_prefix_to_all_handlers(f"[{instance}] ")
 
     logger.info("=" * 60)
     logger.info("kalshi_bot starting")
+    if instance:
+        logger.info("  instance: %s", instance)
     logger.info("  dry_run : %s", os.environ.get("TRADING_DRY_RUN", "true"))
     logger.info("  markets : %s", (
         os.environ.get("KALSHI_MARKETS")
         or os.environ.get("KALSHI_SERIES")
         or "(not set)"
     ))
-    logger.info("  output  : %s", args.output)
+    logger.info("  output  : %s", output_dir)
     logger.info("=" * 60)
 
     try:

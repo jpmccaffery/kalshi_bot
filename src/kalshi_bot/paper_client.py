@@ -32,6 +32,11 @@ from trading_bot.models import Order, OrderResult
 
 from kalshi_bot.auth import auth_headers, load_private_key
 
+def _taker_fee(price: Decimal) -> Decimal:
+    """Kalshi taker fee: 7¢ × C × (1 − C) per contract."""
+    p = Decimal(str(price))
+    return Decimal("0.07") * p * (1 - p)
+
 logger = logging.getLogger(__name__)
 
 _POSITION_COLS = ["symbol", "quantity", "avg_entry_price", "entry_ts", "original_edge"]
@@ -85,17 +90,18 @@ class PaperTradingClient:
     # ------------------------------------------------------------------
 
     def place_limit_order(self, order: Order) -> OrderResult:
-        qty   = Decimal(str(order.quantity)).quantize(Decimal("1"))
+        qty   = max(Decimal("1"), Decimal(str(order.quantity)).quantize(Decimal("1"), rounding="ROUND_HALF_UP"))
         price = Decimal(str(order.limit_price))
 
         if qty <= 0:
             return self._result(order.order_id, "rejected", Decimal("0"), None)
 
         if order.side == "buy":
-            cost = qty * price
+            fee_per = _taker_fee(price)
+            cost = qty * (price + fee_per)
             if cost > self._balance:
-                qty  = (self._balance / price).quantize(Decimal("1"))
-                cost = qty * price
+                qty  = (self._balance / (price + fee_per)).quantize(Decimal("1"))
+                cost = qty * (price + fee_per)
                 if qty <= 0:
                     logger.warning(
                         "Paper BUY %s: insufficient balance ($%.2f) — skipping",
@@ -104,22 +110,26 @@ class PaperTradingClient:
                     return self._result(order.order_id, "rejected", Decimal("0"), None)
 
             self._balance -= cost
+            contract_cost = qty * price
+            fees          = qty * fee_per
             pos = self._positions.get(order.symbol)
             if pos:
                 pos["qty"]        += qty
                 pos["cost_basis"] += cost
             else:
                 self._positions[order.symbol] = {
-                    "qty":        qty,
-                    "cost_basis": cost,
-                    "entry_ts":   datetime.now(tz=self._tz),
+                    "qty":         qty,
+                    "cost_basis":  cost,
+                    "entry_ts":    datetime.now(tz=self._tz),
+                    "kalshi_side": order.metadata.get("kalshi_side", "yes"),
                 }
 
             logger.info(
-                "Paper BUY  %s  qty=%s  price=$%.4f  cost=$%.2f  balance=$%.2f",
-                order.symbol, qty, float(price), float(cost), float(self._balance),
+                "Paper BUY-%s  %s  qty=%s  price=$%.4f  fee=$%.4f  cost=$%.2f  balance=$%.2f",
+                order.metadata.get("kalshi_side", "yes").upper(),
+                order.symbol, qty, float(price), float(fees), float(cost), float(self._balance),
             )
-            return self._result(order.order_id, "filled", qty, price)
+            return self._result(order.order_id, "filled", qty, price, fees)
 
         else:  # sell
             pos = self._positions.get(order.symbol)
@@ -129,18 +139,18 @@ class PaperTradingClient:
 
             sell_qty = min(qty, pos["qty"])
             proceeds = sell_qty * price
-            self._balance     += proceeds
+            fees     = sell_qty * _taker_fee(price)
+            self._balance     += proceeds - fees
             pos["qty"]        -= sell_qty
             pos["cost_basis"] -= pos["cost_basis"] * sell_qty / (pos["qty"] + sell_qty)
 
             if pos["qty"] <= 0:
                 del self._positions[order.symbol]
-
             logger.info(
                 "Paper SELL %s  qty=%s  price=$%.4f  proceeds=$%.2f  balance=$%.2f",
                 order.symbol, sell_qty, float(price), float(proceeds), float(self._balance),
             )
-            return self._result(order.order_id, "filled", sell_qty, price)
+            return self._result(order.order_id, "filled", sell_qty, price, fees)
 
     def cancel_order(self, order_id: str) -> bool:
         return True
@@ -208,37 +218,39 @@ class PaperTradingClient:
                 logger.warning("Market status fetch error for %s: %s", ticker, exc)
 
         for ticker, result in to_settle:
-            pos  = self._positions.pop(ticker)
-            qty  = pos["qty"]
-            cost = pos["cost_basis"]
-            ts   = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+            pos         = self._positions.pop(ticker)
+            qty         = pos["qty"]
+            cost        = pos["cost_basis"]
+            kalshi_side = pos.get("kalshi_side", "yes")
+            ts          = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
 
-            if result == "yes":
-                payout         = qty * Decimal("1.00")
+            # For NO holders: win when result=="no", lose when result=="yes".
+            # For YES holders (default): win when result=="yes".
+            if result == "void":
+                payout         = cost
+                pnl            = Decimal("0")
                 self._balance += payout
-                pnl            = payout - cost
-                logger.info(
-                    "Paper SETTLE %s → YES  qty=%s  payout=$%.2f  pnl=%+.2f  balance=$%.2f",
-                    ticker, qty, float(payout), float(pnl), float(self._balance),
-                )
-                self._write_settlement(ts, ticker, "yes", qty, cost, payout, pnl)
-            elif result == "void":
-                self._balance += cost
-                payout = cost
-                pnl    = Decimal("0")
-                logger.info(
-                    "Paper SETTLE %s → VOID  refund=$%.2f  balance=$%.2f",
-                    ticker, float(cost), float(self._balance),
-                )
+                logger.info("Paper SETTLE %s → VOID  refund=$%.2f  balance=$%.2f",
+                            ticker, float(cost), float(self._balance))
                 self._write_settlement(ts, ticker, "void", qty, cost, payout, pnl)
-            else:  # "no"
+            elif (result == "yes" and kalshi_side == "yes") or \
+                 (result == "no"  and kalshi_side == "no"):
+                payout         = qty * Decimal("1.00")
+                pnl            = payout - cost
+                self._balance += payout
+                logger.info("Paper SETTLE %s → %s (WIN, side=%s)  qty=%s  payout=$%.2f"
+                            "  pnl=%+.2f  balance=$%.2f",
+                            ticker, result.upper(), kalshi_side,
+                            qty, float(payout), float(pnl), float(self._balance))
+                self._write_settlement(ts, ticker, result, qty, cost, payout, pnl)
+            else:
                 payout = Decimal("0")
                 pnl    = -cost
-                logger.info(
-                    "Paper SETTLE %s → NO  qty=%s  pnl=%+.2f  balance=$%.2f",
-                    ticker, qty, float(pnl), float(self._balance),
-                )
-                self._write_settlement(ts, ticker, "no", qty, cost, payout, pnl)
+                logger.info("Paper SETTLE %s → %s (LOSS, side=%s)  qty=%s"
+                            "  pnl=%+.2f  balance=$%.2f",
+                            ticker, result.upper(), kalshi_side,
+                            qty, float(pnl), float(self._balance))
+                self._write_settlement(ts, ticker, result, qty, cost, payout, pnl)
 
     # ------------------------------------------------------------------
     # Internal
@@ -281,13 +293,14 @@ class PaperTradingClient:
         status:     str,
         filled_qty: Decimal,
         price:      Decimal | None,
+        fees:       Decimal = Decimal("0"),
     ) -> OrderResult:
         return OrderResult(
             order_id       = order_id,
             status         = status,
             filled_qty     = filled_qty,
             avg_fill_price = price,
-            fees_paid      = Decimal("0"),
+            fees_paid      = fees,
             exchange_ts    = datetime.now(tz=timezone.utc),
             raw_response   = {},
         )

@@ -44,6 +44,10 @@ class EdgeRow:
     model_prob: float
     fee: float
     edge: float
+    # NO-side fields
+    no_ask: float = 0.0
+    no_fee: float = 0.0
+    no_edge: float = float("-inf")
     forecast_p10: Optional[float] = None
     forecast_p25: Optional[float] = None
     forecast_p50: Optional[float] = None
@@ -63,6 +67,7 @@ class Contract:
     low: Optional[float]  # None for one-sided tails
     high: Optional[float]
     yes_ask: float
+    no_ask: float = 0.0
 
 
 def taker_fee(yes_ask: float) -> float:
@@ -141,12 +146,16 @@ class Recommender:
             return []
         rows: list[EdgeRow] = []
         for c in contracts:
-            p = self._contract_prob(dist, c)
-            fee = taker_fee(c.yes_ask)
-            edge = p - c.yes_ask - fee
+            p      = self._contract_prob(dist, c)
+            fee    = taker_fee(c.yes_ask)
+            edge   = p - c.yes_ask - fee
+            no_prob = 1.0 - p
+            no_fee  = taker_fee(c.no_ask) if c.no_ask > 0 else 0.0
+            no_edge = no_prob - c.no_ask - no_fee if c.no_ask > 0 else float("-inf")
             rows.append(EdgeRow(
                 contract=c.label, yes_ask=c.yes_ask,
                 model_prob=p, fee=fee, edge=edge,
+                no_ask=c.no_ask, no_fee=no_fee, no_edge=no_edge,
                 forecast_p10=dist.p10,
                 forecast_p25=dist.p25,
                 forecast_p50=dist.p50,

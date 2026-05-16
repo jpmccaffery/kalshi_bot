@@ -43,6 +43,7 @@ _DEMO_BASE = "https://demo-api.kalshi.co"
 _LIVE_BASE = "https://api.elections.kalshi.com"
 
 _STATUS_MAP = {
+    "executed":         "filled",   # Kalshi term for a fully-filled order
     "filled":           "filled",
     "partially_filled": "partial",
     "resting":          "partial",
@@ -88,15 +89,17 @@ class KalshiTradingClient:
 
     def place_limit_order(self, order: Order) -> OrderResult:
         path = "/trade-api/v2/portfolio/orders"
-        yes_price_cents = max(1, min(99, round(float(order.limit_price) * 100)))
+        kalshi_side = order.metadata.get("kalshi_side", "yes")
+        price_cents = max(1, min(99, round(float(order.limit_price) * 100)))
+        price_key   = "no_price" if kalshi_side == "no" else "yes_price"
         body = {
             "ticker":          order.symbol,
             "client_order_id": order.order_id,
             "type":            "limit",
             "action":          order.side,        # "buy" or "sell"
-            "side":            "yes",             # we always trade the YES side
-            "count":           int(order.quantity),
-            "yes_price":       yes_price_cents,
+            "side":            kalshi_side,
+            "count":           max(1, round(float(order.quantity))),
+            price_key:         price_cents,
             "time_in_force":   "immediate_or_cancel",
         }
         data = self._request("POST", path, json_body=body)
@@ -108,9 +111,7 @@ class KalshiTradingClient:
         logger.debug("place_limit_order raw response: %s", resp_order)
 
         raw_status = resp_order.get("status", "")
-        taker_fill = int(resp_order.get("taker_fill_count") or 0)
-        maker_fill = int(resp_order.get("maker_fill_count") or 0)
-        filled_qty = Decimal(str(taker_fill + maker_fill))
+        filled_qty = Decimal(str(resp_order.get("fill_count_fp") or 0))
 
         # An IOC order that partially fills comes back as "canceled" for the
         # unfilled remainder — treat it as "filled" if anything was filled,
@@ -120,19 +121,23 @@ class KalshiTradingClient:
         else:
             status = _STATUS_MAP.get(raw_status, "partial")
 
-        taker_cost = int(resp_order.get("taker_fill_cost") or 0)
-        maker_cost = int(resp_order.get("maker_fill_cost") or 0)
-        total_cost_cents = taker_cost + maker_cost
-        total_filled = taker_fill + maker_fill
-        if total_filled > 0 and total_cost_cents > 0:
-            avg_fill = Decimal(str(total_cost_cents / 100.0 / total_filled))
-        else:
-            yes_price = resp_order.get("yes_price")
-            avg_fill  = Decimal(str(yes_price / 100.0)) if yes_price else None
+        # Actual fill price: total cost paid divided by contracts filled.
+        taker_cost = Decimal(str(resp_order.get("taker_fill_cost_dollars") or 0))
+        maker_cost = Decimal(str(resp_order.get("maker_fill_cost_dollars") or 0))
+        total_cost = taker_cost + maker_cost
+        avg_fill   = (total_cost / filled_qty).quantize(Decimal("0.000001")) if filled_qty > 0 else None
+
+        # Actual fees reported by the exchange.
+        taker_fees = Decimal(str(resp_order.get("taker_fees_dollars") or 0))
+        maker_fees = Decimal(str(resp_order.get("maker_fees_dollars") or 0))
+        fees_paid  = taker_fees + maker_fees
 
         logger.info(
-            "KalshiTradingClient: %s %s qty=%s price=%s → %s (filled=%s)",
-            order.side, order.symbol, order.quantity, order.limit_price, status, filled_qty,
+            "KalshiTradingClient: %s %s (%s) qty=%s limit=%s fill=%s → %s (fees=$%.4f)",
+            order.side, order.symbol, kalshi_side,
+            filled_qty, order.limit_price,
+            avg_fill if avg_fill else "0",
+            status, float(fees_paid),
         )
 
         return OrderResult(
@@ -140,7 +145,7 @@ class KalshiTradingClient:
             status        = status,
             filled_qty    = filled_qty,
             avg_fill_price= avg_fill,
-            fees_paid     = Decimal("0"),
+            fees_paid     = fees_paid,
             exchange_ts   = datetime.now(tz=timezone.utc),
             raw_response  = resp_order,
         )
