@@ -28,33 +28,20 @@ log = logging.getLogger(__name__)
 
 # NBP full-coverage cycles (UTC hours).
 NBM_FULL_CYCLES = (1, 7, 13, 19)
-# A new cycle becomes available ~90 minutes after the cycle hour.
-NBM_AVAILABILITY_DELAY_HOURS = 1.5
 
 
-def _latest_available_cycle(now: dt.datetime) -> dt.datetime:
-    """
-    Compute the most recent NBP cycle timestamp that should be available.
-
-    A cycle at hour H on date D is available at approximately (D H:00Z + 90min).
-    Returns a timezone-aware UTC datetime for the cycle itself (not the
-    availability time).
-    """
-    cutoff = now - dt.timedelta(hours=NBM_AVAILABILITY_DELAY_HOURS)
-    date = cutoff.date()
-    hour = cutoff.hour
-
-    candidates = [c for c in NBM_FULL_CYCLES if c <= hour]
-    if candidates:
-        cycle_hour = max(candidates)
-        return dt.datetime(date.year, date.month, date.day,
-                           cycle_hour, tzinfo=dt.timezone.utc)
-
-    # Wrap to previous day's last cycle.
-    prev = date - dt.timedelta(days=1)
-    cycle_hour = max(NBM_FULL_CYCLES)
-    return dt.datetime(prev.year, prev.month, prev.day,
-                       cycle_hour, tzinfo=dt.timezone.utc)
+def _candidate_cycles(now: dt.datetime) -> list[dt.datetime]:
+    """Return cycle datetimes from newest to oldest, covering ~24h."""
+    result = []
+    date = now.date()
+    hour = now.hour
+    for _ in range(2):
+        for c in sorted([c for c in NBM_FULL_CYCLES if c <= hour], reverse=True):
+            result.append(dt.datetime(date.year, date.month, date.day,
+                                      c, tzinfo=dt.timezone.utc))
+        date -= dt.timedelta(days=1)
+        hour = 23
+    return result
 
 
 class NBMSource(SourceClient):
@@ -79,41 +66,50 @@ class NBMSource(SourceClient):
         """
         self._update_last_poll(now)
 
-        expected_cycle = _latest_available_cycle(now)
+        candidates = _candidate_cycles(now)
+        newest_cycle = candidates[0] if candidates else None
 
         # Determine if we need to fetch a new bulletin.
         need_fetch = (self._current_cycle is None or
-                      expected_cycle > self._current_cycle)
+                      (newest_cycle is not None and newest_cycle > self._current_cycle))
 
         if need_fetch:
-            log.info("NBM: fetching new bulletin for cycle %s", expected_cycle.isoformat())
-            cycle_date = expected_cycle.date()
-            cycle_hour = expected_cycle.hour
-
             async def fetch_all_stations():
                 loop = asyncio.get_event_loop()
-                station_data: dict[str, list[TempPercentiles]] = {}
-                bulletin_text: Optional[str] = None
 
-                # Fetch the bulletin once (it covers all stations).
-                try:
-                    if self._semaphore:
-                        async with self._semaphore:
+                # Try candidates newest-first until one succeeds.
+                bulletin_text: Optional[str] = None
+                fetched_cycle: Optional[dt.datetime] = None
+                for candidate in candidates:
+                    if candidate <= (self._current_cycle or dt.datetime.min.replace(tzinfo=dt.timezone.utc)):
+                        break  # no point trying cycles we already have
+                    c_date, c_hour = candidate.date(), candidate.hour
+                    try:
+                        if self._semaphore:
+                            async with self._semaphore:
+                                bulletin_text = await loop.run_in_executor(
+                                    None,
+                                    lambda d=c_date, h=c_hour: self._client.fetch_bulletin(d, h),
+                                )
+                        else:
                             bulletin_text = await loop.run_in_executor(
                                 None,
-                                lambda: self._client.fetch_bulletin(cycle_date, cycle_hour),
+                                lambda d=c_date, h=c_hour: self._client.fetch_bulletin(d, h),
                             )
-                    else:
-                        bulletin_text = await loop.run_in_executor(
-                            None,
-                            lambda: self._client.fetch_bulletin(cycle_date, cycle_hour),
-                        )
-                except Exception as exc:
-                    log.warning("NBM: bulletin fetch failed for cycle %s: %s",
-                                expected_cycle.isoformat(), exc)
-                    return None, {}
+                        fetched_cycle = candidate
+                        log.info("NBM: fetched bulletin for cycle %s", candidate.isoformat())
+                        break
+                    except Exception as exc:
+                        log.info("NBM: cycle %s not yet available (%s), trying previous",
+                                 candidate.isoformat(), exc)
+
+                if bulletin_text is None or fetched_cycle is None:
+                    log.warning("NBM: no bulletin available for any recent cycle")
+                    return None, None, {}
 
                 raw_hash = hashlib.sha256(bulletin_text.encode()).hexdigest()
+                station_data: dict[str, list[TempPercentiles]] = {}
+                c_date, c_hour = fetched_cycle.date(), fetched_cycle.hour
 
                 # Parse per station.
                 for station in stations:
@@ -122,8 +118,8 @@ class NBMSource(SourceClient):
                             None,
                             lambda s=station: self._client.get_percentiles(
                                 s.icao,
-                                date=cycle_date,
-                                cycle=cycle_hour,
+                                date=c_date,
+                                cycle=c_hour,
                                 station_tz_offset=s.tz_standard_offset,
                             ),
                         )
@@ -132,13 +128,13 @@ class NBMSource(SourceClient):
                         log.warning("NBM: parse failed for %s: %s", station.icao, exc)
                         station_data[station.icao] = []
 
-                return raw_hash, station_data
+                return raw_hash, fetched_cycle, station_data
 
-            raw_hash, station_data = await fetch_all_stations()
+            raw_hash, fetched_cycle, station_data = await fetch_all_stations()
 
             if raw_hash is not None:
-                self._cache[expected_cycle] = (raw_hash, station_data)
-                self._current_cycle = expected_cycle
+                self._cache[fetched_cycle] = (raw_hash, station_data)
+                self._current_cycle = fetched_cycle
             elif self._current_cycle is None:
                 # No cache at all yet — can't produce rows.
                 log.warning("NBM: no cached data available, skipping poll")
@@ -146,6 +142,8 @@ class NBMSource(SourceClient):
             # else: fall through to use the old cache
 
         # Use cached data (either just fetched or from a previous cycle).
+        if not need_fetch:
+            log.info("NBM: using cached cycle %s", self._current_cycle.isoformat() if self._current_cycle else "none")
         use_cycle = self._current_cycle
         if use_cycle not in self._cache:
             log.warning("NBM: cache miss for cycle %s", use_cycle)

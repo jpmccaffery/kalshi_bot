@@ -125,20 +125,17 @@ class NBMClient:
         # covers all 39 stations.
         self._bulletin_cache: dict[tuple[dt.date, int], str] = {}
 
-    def latest_full_cycle(self, now_utc: Optional[dt.datetime] = None
-                          ) -> tuple[dt.date, int]:
-        """The most recent (date, cycle) that should have complete NBP data."""
-        now = now_utc or dt.datetime.now(dt.timezone.utc)
-        # NBP is typically available ~90 minutes after the cycle hour.
-        # Allow 2h to be safe.
-        cutoff = now - dt.timedelta(hours=2)
-        date = cutoff.date()
-        hour = cutoff.hour
-        candidates = [c for c in FULL_NBP_CYCLES if c <= hour]
-        if candidates:
-            return date, max(candidates)
-        # Wrap around to the previous day's last cycle.
-        return date - dt.timedelta(days=1), max(FULL_NBP_CYCLES)
+    def _cycle_candidates(self, now: dt.datetime) -> list[tuple[dt.date, int]]:
+        """Return (date, cycle) pairs from newest to oldest, covering ~24h."""
+        result = []
+        date = now.date()
+        hour = now.hour
+        for _ in range(2):
+            for c in sorted([c for c in FULL_NBP_CYCLES if c <= hour], reverse=True):
+                result.append((date, c))
+            date -= dt.timedelta(days=1)
+            hour = 23  # all cycles valid for previous day
+        return result
 
     def _bulletin_url(self, date: dt.date, cycle: int) -> str:
         return (f"{NOMADS_BASE}/blend.{date:%Y%m%d}/{cycle:02d}/text/"
@@ -164,19 +161,35 @@ class NBMClient:
         Return a list of TempPercentiles, one per forecast column for both
         max and min where data exists. station_tz_offset is the LST UTC
         offset (e.g. -5 EST, -6 CST, -8 PST).
+
+        If date/cycle are not specified, tries the newest available cycle
+        and falls back to the previous one if the file isn't published yet.
         """
-        if date is None or cycle is None:
-            date, cycle = self.latest_full_cycle()
-        text = self.fetch_bulletin(date, cycle)
-        block = _extract_station_block(text, station_icao)
-        if block is None:
-            raise NBMError(f"Station {station_icao} not found in bulletin "
-                           f"{date} {cycle:02d}Z")
-        return _parse_nbp_block(block, station_icao,
-                                cycle_dt=dt.datetime(
-                                    date.year, date.month, date.day,
-                                    cycle, tzinfo=dt.timezone.utc),
-                                station_tz_offset=station_tz_offset)
+        if date is not None and cycle is not None:
+            candidates = [(date, cycle)]
+        else:
+            candidates = self._cycle_candidates(dt.datetime.now(dt.timezone.utc))
+
+        last_exc: Optional[Exception] = None
+        for d, c in candidates:
+            try:
+                text = self.fetch_bulletin(d, c)
+                block = _extract_station_block(text, station_icao)
+                if block is None:
+                    raise NBMError(f"Station {station_icao} not found in bulletin "
+                                   f"{d} {c:02d}Z")
+                return _parse_nbp_block(block, station_icao,
+                                        cycle_dt=dt.datetime(
+                                            d.year, d.month, d.day,
+                                            c, tzinfo=dt.timezone.utc),
+                                        station_tz_offset=station_tz_offset)
+            except NBMError as exc:
+                log.debug("NBM: cycle %s %02dZ unavailable (%s), trying previous", d, c, exc)
+                last_exc = exc
+
+        log.warning("NBM: no bulletin available for %s — all candidates failed: %s",
+                    station_icao, last_exc)
+        return []
 
 
 # ---------- parsing ----------
