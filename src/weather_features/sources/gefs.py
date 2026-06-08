@@ -24,7 +24,6 @@ from .base import SourceClient, nearest_val
 log = logging.getLogger(__name__)
 
 GEFS_CYCLES = (0, 6, 12, 18)
-GEFS_AVAILABILITY_DELAY_H = 5  # GEFS takes ~4-5h to become available
 
 # Members: 0 (control) + 1-30 (perturbed) = 31 total
 N_MEMBERS = 31
@@ -36,20 +35,18 @@ GEFS_FHRS = list(range(0, 169, 3))  # 0, 3, 6, ..., 168
 VAR_TEMP = "TMP:2 m"
 
 
-def _latest_available_cycle(now: dt.datetime) -> dt.datetime:
-    """Return the most recent GEFS cycle that should be available."""
-    cutoff = now - dt.timedelta(hours=GEFS_AVAILABILITY_DELAY_H)
-    date = cutoff.date()
-    hour = cutoff.hour
-    candidates = [c for c in GEFS_CYCLES if c <= hour]
-    if candidates:
-        cycle_hour = max(candidates)
-        return dt.datetime(date.year, date.month, date.day,
-                           cycle_hour, tzinfo=dt.timezone.utc)
-    prev = date - dt.timedelta(days=1)
-    cycle_hour = max(GEFS_CYCLES)
-    return dt.datetime(prev.year, prev.month, prev.day,
-                       cycle_hour, tzinfo=dt.timezone.utc)
+def _candidate_cycles(now: dt.datetime) -> list[dt.datetime]:
+    """Return GEFS cycle datetimes from newest to oldest, covering ~24h."""
+    result = []
+    date = now.date()
+    hour = now.hour
+    for _ in range(2):
+        for c in sorted([c for c in GEFS_CYCLES if c <= hour], reverse=True):
+            result.append(dt.datetime(date.year, date.month, date.day,
+                                      c, tzinfo=dt.timezone.utc))
+        date -= dt.timedelta(days=1)
+        hour = 23
+    return result
 
 
 def _fhrs_needed(now: dt.datetime, cycle: dt.datetime) -> list[int]:
@@ -135,54 +132,64 @@ class GEFSSource(SourceClient):
             log.warning("GEFS: herbie not installed, skipping")
             return []
 
-        cycle = _latest_available_cycle(now)
-        raw_hash = self._cycle_hash(cycle)
+        candidates = _candidate_cycles(now)
+        newest = candidates[0] if candidates else None
 
-        need_fetch = (self._cached_cycle is None or cycle > self._cached_cycle)
+        need_fetch = (self._cached_cycle is None or
+                      (newest is not None and newest > self._cached_cycle))
 
         if need_fetch:
-            log.info("GEFS: fetching cycle %s (%d members)", cycle.isoformat(), N_MEMBERS)
-            fhrs = _fhrs_needed(now, cycle)
-            new_data: dict[int, dict[int, dict]] = {}  # member -> fhr -> {icao: temp_k}
-
             loop = asyncio.get_event_loop()
-            any_success = False
+            fetched = False
 
-            data_unavailable = False
-            for member in MEMBER_IDS:
-                if data_unavailable:
+            for cycle in candidates:
+                if cycle <= (self._cached_cycle or dt.datetime.min.replace(tzinfo=dt.timezone.utc)):
                     break
-                new_data[member] = {}
-                for fhr in fhrs:
-                    try:
-                        fhr_data = await loop.run_in_executor(
-                            None,
-                            lambda m=member, f=fhr: self._fetch_member_fhr(
-                                cycle, m, f, stations
-                            ),
-                        )
-                        new_data[member][fhr] = fhr_data
-                        any_success = True
-                    except ValueError as exc:
-                        log.info("GEFS: m=%d fhr=%d not available: %s", member, fhr, exc)
-                        if member == 0:
-                            log.info("GEFS: data not yet available for cycle %s, aborting", cycle.isoformat())
-                            data_unavailable = True
-                        break
-                    except Exception as exc:
-                        log.warning("GEFS: m=%d fhr=%d failed: %s", member, fhr, exc)
+                log.info("GEFS: trying cycle %s (%d members)", cycle.isoformat(), N_MEMBERS)
+                fhrs = _fhrs_needed(now, cycle)
+                new_data: dict[int, dict[int, dict]] = {}
+                any_success = False
+                data_unavailable = False
 
-            if any_success:
-                self._cached_cycle = cycle
-                self._cached_data = new_data
-            elif self._cached_data is None:
-                log.warning("GEFS: no data available, skipping poll")
+                for member in MEMBER_IDS:
+                    if data_unavailable:
+                        break
+                    new_data[member] = {}
+                    for fhr in fhrs:
+                        try:
+                            fhr_data = await loop.run_in_executor(
+                                None,
+                                lambda m=member, f=fhr, c=cycle: self._fetch_member_fhr(
+                                    c, m, f, stations
+                                ),
+                            )
+                            new_data[member][fhr] = fhr_data
+                            any_success = True
+                        except ValueError as exc:
+                            log.info("GEFS: m=%d fhr=%d not available: %s", member, fhr, exc)
+                            if member == 0:
+                                log.info("GEFS: cycle %s not yet available, trying previous",
+                                         cycle.isoformat())
+                                data_unavailable = True
+                            break
+                        except Exception as exc:
+                            log.warning("GEFS: m=%d fhr=%d failed: %s", member, fhr, exc)
+
+                if any_success and not data_unavailable:
+                    self._cached_cycle = cycle
+                    self._cached_data = new_data
+                    fetched = True
+                    break
+
+            if not fetched and self._cached_data is None:
+                log.warning("GEFS: no data available from any recent cycle, skipping poll")
                 return []
-            raw_hash = self._cycle_hash(self._cached_cycle)
         else:
-            log.debug("GEFS: reusing cached cycle %s", self._cached_cycle.isoformat())
+            log.info("GEFS: using cached cycle %s", self._cached_cycle.isoformat())
             if self._cached_data is None:
                 return []
+
+        raw_hash = self._cycle_hash(self._cached_cycle)
 
         # Build rows
         rows: list[dict] = []

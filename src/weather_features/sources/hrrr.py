@@ -24,9 +24,6 @@ from .base import SourceClient, nearest_val
 
 log = logging.getLogger(__name__)
 
-# HRRR availability: ~45 min after cycle
-HRRR_AVAILABILITY_DELAY_MIN = 50  # Use 50 min to be safe
-
 # Extended cycles (go to F48)
 HRRR_EXTENDED_CYCLES = {0, 6, 12, 18}
 
@@ -37,14 +34,10 @@ VAR_VGRD = "VGRD:10 m"
 VAR_PRES = "PRES:surface"
 
 
-def _latest_available_cycle(now: dt.datetime) -> dt.datetime:
-    """Return the most recent HRRR cycle that should be available."""
-    cutoff = now - dt.timedelta(minutes=HRRR_AVAILABILITY_DELAY_MIN)
-    # Truncate to hour
-    cycle_hour = cutoff.hour
-    cycle_date = cutoff.date()
-    return dt.datetime(cycle_date.year, cycle_date.month, cycle_date.day,
-                       cycle_hour, tzinfo=dt.timezone.utc)
+def _candidate_cycles(now: dt.datetime, n: int = 4) -> list[dt.datetime]:
+    """Return the n most recent HRRR cycle datetimes, newest first."""
+    base = now.replace(minute=0, second=0, microsecond=0)
+    return [base - dt.timedelta(hours=i) for i in range(n)]
 
 
 def _max_fhr(cycle_hour: int) -> int:
@@ -200,42 +193,53 @@ class HRRRSource(SourceClient):
             log.warning("HRRR: herbie not installed, skipping")
             return []
 
-        cycle = _latest_available_cycle(now)
-        raw_hash = self._cycle_hash(cycle)
+        candidates = _candidate_cycles(now)
+        newest = candidates[0]
 
-        need_fetch = (self._cached_cycle is None or cycle > self._cached_cycle)
+        need_fetch = (self._cached_cycle is None or newest > self._cached_cycle)
 
         if need_fetch:
-            log.info("HRRR: fetching cycle %s (max_fhr=%d)",
-                     cycle.isoformat(), _max_fhr(cycle.hour))
-            fhrs = _fhrs_needed(now, cycle)
-            new_data: dict[int, dict] = {}
-
             loop = asyncio.get_event_loop()
-            for fhr in fhrs:
-                try:
-                    fhr_data = await loop.run_in_executor(
-                        None, lambda f=fhr: self._fetch_fhr(cycle, f, stations)
-                    )
-                    new_data[fhr] = fhr_data
-                except ValueError as exc:
-                    log.info("HRRR: cycle %s fhr=%d not yet available, aborting: %s",
-                             cycle.isoformat(), fhr, exc)
-                    break  # If first fhr isn't available, none will be
-                except Exception as exc:
-                    log.warning("HRRR: fhr=%d failed: %s", fhr, exc)
+            for cycle in candidates:
+                if cycle <= (self._cached_cycle or dt.datetime.min.replace(tzinfo=dt.timezone.utc)):
+                    break  # no point trying cycles we already have
+                log.info("HRRR: trying cycle %s (max_fhr=%d)",
+                         cycle.isoformat(), _max_fhr(cycle.hour))
+                fhrs = _fhrs_needed(now, cycle)
+                new_data: dict[int, dict] = {}
+                available = True
 
-            if new_data:
-                self._cached_cycle = cycle
-                self._cached_data = new_data
-            elif self._cached_data is None:
-                log.warning("HRRR: no data available, skipping poll")
+                for fhr in fhrs:
+                    try:
+                        fhr_data = await loop.run_in_executor(
+                            None, lambda f=fhr, c=cycle: self._fetch_fhr(c, f, stations)
+                        )
+                        new_data[fhr] = fhr_data
+                    except ValueError as exc:
+                        log.info("HRRR: cycle %s fhr=%d not yet available, trying previous cycle: %s",
+                                 cycle.isoformat(), fhr, exc)
+                        available = False
+                        break
+                    except Exception as exc:
+                        log.warning("HRRR: fhr=%d failed: %s", fhr, exc)
+
+                if new_data and available:
+                    self._cached_cycle = cycle
+                    self._cached_data = new_data
+                    break
+                elif new_data:
+                    # Got partial data but cycle not fully available — try previous
+                    continue
+
+            if self._cached_data is None:
+                log.warning("HRRR: no data available from any recent cycle, skipping poll")
                 return []
-            raw_hash = self._cycle_hash(self._cached_cycle)
         else:
-            log.debug("HRRR: reusing cached cycle %s", self._cached_cycle.isoformat())
+            log.info("HRRR: using cached cycle %s", self._cached_cycle.isoformat())
             if self._cached_data is None:
                 return []
+
+        raw_hash = self._cycle_hash(self._cached_cycle)
 
         # Build rows
         rows: list[dict] = []
