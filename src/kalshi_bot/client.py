@@ -81,7 +81,9 @@ class KalshiTradingClient:
         self._key_id      = key_id
         self._private_key = load_private_key(private_key_path)
         self._tz          = tz
-        self._entry_times: dict[str, datetime] = {}
+        self._entry_times:   dict[str, datetime] = {}
+        self._prev_tickers:  set[str] | None     = None   # tickers held at end of last tick
+        self._prev_qtys:     dict[str, Decimal]  = {}     # qty/cost for settlement calc
 
     # ------------------------------------------------------------------
     # TradingClientProtocol
@@ -217,6 +219,60 @@ class KalshiTradingClient:
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
+
+    def detect_settlements(self, output_dir: "Path | None") -> None:
+        """
+        Compare current live positions against last tick's positions.
+        Tickers that disappeared are queried for their settlement result
+        and written to settlements.csv in output_dir.
+        Called once per tick from run.py after all tick processing.
+        """
+        import csv as _csv
+        from pathlib import Path as _Path
+
+        data      = self._request("GET", "/trade-api/v2/portfolio/positions")
+        positions = data.get("market_positions", [])
+        current   = {
+            pos["ticker"]: Decimal(str(float(pos.get("position_fp") or 0)))
+            for pos in positions
+            if float(pos.get("position_fp") or 0) > 0
+        }
+
+        if self._prev_tickers is None:
+            # First tick — just record current state, nothing to compare against.
+            self._prev_tickers = set(current)
+            self._prev_qtys    = dict(current)
+            return
+
+        settled_tickers = self._prev_tickers - set(current)
+        old_qtys           = dict(self._prev_qtys)
+        self._prev_tickers = set(current)
+        self._prev_qtys    = dict(current)
+
+        if not settled_tickers or not output_dir:
+            return
+
+        _FIELDS = ["ts", "symbol", "result"]
+        path_csv = _Path(output_dir) / "settlements.csv"
+        write_header = not path_csv.exists()
+
+        with path_csv.open("a", newline="") as f:
+            writer = _csv.DictWriter(f, fieldnames=_FIELDS)
+            if write_header:
+                writer.writeheader()
+
+            for ticker in sorted(settled_tickers):
+                try:
+                    mkt = self._request("GET", f"/trade-api/v2/markets/{ticker}")
+                    market = mkt.get("market", {})
+                    result = market.get("result", "")
+                    if result not in ("yes", "no", "void"):
+                        continue  # not yet finalized
+                    ts = datetime.now(tz=self._tz).strftime("%Y-%m-%d %H:%M")
+                    writer.writerow({"ts": ts, "symbol": ticker, "result": result})
+                    logger.info("Settled %s → %s", ticker, result.upper())
+                except Exception as exc:
+                    logger.warning("Settlement check failed for %s: %s", ticker, exc)
 
     def _request(self, method: str, path: str, json_body: dict | None = None) -> dict:
         import requests

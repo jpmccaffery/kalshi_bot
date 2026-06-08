@@ -7,6 +7,10 @@ Collect 1-3 months of weather forecast and observation data, polled every
 Parquet dataset of raw source payloads suitable for downstream feature
 engineering and predictive modeling.
 
+Sources may poll less frequently than 10 minutes if their underlying data
+updates rarely (e.g. CLI is daily, ECMWF/GEFS are 4x/day). The scheduler
+enforces per-source `min_poll_interval_sec` to avoid redundant downloads.
+
 This is a research data pipeline, not a production trading component.
 Latency does not matter. Completeness, provenance, and faithfulness to
 the source's native shape matter.

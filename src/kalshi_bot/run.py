@@ -28,6 +28,7 @@ from trading_bot.models import Tick
 from trading_bot.run_logger import RunLogger
 
 from kalshi_bot.config import build_bot_config, load_env
+from kalshi_bot.client import KalshiTradingClient
 from kalshi_bot.paper_client import PaperTradingClient
 
 ROOT       = Path(__file__).parent.parent.parent   # repo root
@@ -91,6 +92,41 @@ def _append_ev_tick(
             "market_value_bid": round(market_value, 4),
             "model_ev":         round(model_ev, 4),
         })
+
+
+def _patch_orders_kalshi_side(run_dir: Path) -> None:
+    """
+    Add/update a kalshi_side column in orders.csv using signals.csv as source.
+    Called after every run_logger.record() so the file stays current.
+    long signal → yes, short signal → no. Sells inherit from their buy signal.
+    """
+    orders_path  = run_dir / "orders.csv"
+    signals_path = run_dir / "signals.csv"
+    if not orders_path.exists() or not signals_path.exists():
+        return
+
+    # Build symbol -> side from signals (direction: long=yes, short=no)
+    sig_side: dict[str, str] = {}
+    with signals_path.open() as f:
+        for row in csv.DictReader(f):
+            sig_side[row["symbol"]] = "yes" if row["direction"] == "long" else "no"
+
+    orders = list(csv.DictReader(orders_path.open()))
+    if not orders:
+        return
+
+    # For sells, inherit side from the buy signal for that symbol
+    for row in orders:
+        row["kalshi_side"] = sig_side.get(row["symbol"], "yes")
+
+    fieldnames = list(orders[0].keys())
+    if "kalshi_side" not in fieldnames:
+        fieldnames.append("kalshi_side")
+
+    with orders_path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(orders)
 
 
 class _PrefixFilter(logging.Filter):
@@ -214,6 +250,10 @@ def main() -> None:
             if isinstance(client, PaperTradingClient):
                 data_feed.pin_tickers(client.held_tickers())
 
+        def _detect_live_settlements() -> None:
+            if isinstance(client, KalshiTradingClient):
+                client.detect_settlements(run_logger.run_dir)
+
         if args.once:
             # Fire immediately at the current time, no waiting
             now  = datetime.now(tz=tz)
@@ -221,9 +261,11 @@ def main() -> None:
             logger.info("--once: firing immediately at %s", now.strftime("%H:%M:%S"))
             result = bot.on_tick(tick)
             run_logger.record(result, client)
+            _patch_orders_kalshi_side(run_logger.run_dir)
             _append_ev_tick(ev_path, now.strftime("%Y-%m-%d %H:%M"),
                             client, result.snapshot.bars, recommender, result)
             _pin_paper_positions()
+            _detect_live_settlements()
         else:
             for tick in calendar:
                 if _stop[0]:
@@ -231,9 +273,11 @@ def main() -> None:
                 _in_tick[0] = True
                 result = bot.on_tick(tick)
                 run_logger.record(result, client)
+                _patch_orders_kalshi_side(run_logger.run_dir)
                 _append_ev_tick(ev_path, tick.ts.strftime("%Y-%m-%d %H:%M"),
                                 client, result.snapshot.bars, recommender, result)
                 _pin_paper_positions()
+                _detect_live_settlements()
                 _in_tick[0] = False
                 if _stop[0]:
                     raise KeyboardInterrupt

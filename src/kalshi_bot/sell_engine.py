@@ -146,57 +146,75 @@ class ModelBasedSellEngine:
     def _write_positions_csv(self, positions: pd.DataFrame,
                              price_map: dict) -> None:
         ts = datetime.now(tz=timezone.utc).isoformat()
-        fieldnames = ["ts", "ticker", "entry_price", "entry_bid", "entry_spread_pct",
-                      "yes_ask", "yes_bid", "model_prob", "net_sell", "pnl_pct", "decision"]
+        fieldnames = ["ts", "ticker", "side", "entry_price", "entry_bid", "entry_spread_pct",
+                      "yes_ask", "yes_bid", "no_ask", "no_bid",
+                      "model_prob", "net_sell", "pnl_pct", "decision"]
         rows = []
         for _, pos in positions.iterrows():
             symbol      = pos.get("symbol")
             entry_price = float(pos.get("avg_entry_price", 0) or 0)
             model_prob  = self._recommender.get_model_prob(symbol) if symbol else None
             price_row   = price_map.get(symbol) if symbol else None
-            yes_ask     = float(price_row.get("yes_ask", "") or "") if price_row is not None else ""
-            yes_bid_raw = float(price_row.get("yes_bid", 0) or 0) if price_row is not None else 0
+            kalshi_side = self._recommender.get_position_side(symbol) if symbol else "yes"
 
-            # Record first bid seen for this ticker as the entry bid.
-            if symbol and yes_bid_raw > 0 and symbol not in self._entry_bids:
-                self._entry_bids[symbol] = yes_bid_raw
+            def _f(col):
+                if price_row is None:
+                    return ""
+                v = price_row.get(col, "") or ""
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    return ""
+
+            yes_ask = _f("yes_ask")
+            yes_bid = _f("yes_bid")
+            no_ask  = _f("no_ask")
+            no_bid  = _f("no_bid")
+
+            # Track first bid seen as entry bid (use the relevant side's bid)
+            side_bid = no_bid if kalshi_side == "no" else yes_bid
+            if symbol and side_bid and symbol not in self._entry_bids:
+                self._entry_bids[symbol] = side_bid
             entry_bid = self._entry_bids.get(symbol, "")
             entry_spread_pct = (
                 round((entry_bid - entry_price) / entry_price * 100, 2)
                 if entry_bid != "" and entry_price else ""
             )
 
-            kalshi_side = self._recommender.get_position_side(symbol) if symbol else "yes"
             if kalshi_side == "no":
-                no_bid_raw = float(price_row.get("no_bid", 0) or 0) if price_row is not None else 0
-                if model_prob is not None and no_bid_raw > 0:
-                    fee      = taker_fee(no_bid_raw)
-                    net_sell = no_bid_raw - fee
+                if model_prob is not None and no_bid:
+                    fee      = taker_fee(no_bid)
+                    net_sell = no_bid - fee
                     no_prob  = 1.0 - model_prob
-                    pnl_pct  = round((no_bid_raw - entry_price) / entry_price * 100, 2) if entry_price else ""
+                    pnl_pct  = round((no_bid - entry_price) / entry_price * 100, 2) if entry_price else ""
                     decision = "sell" if net_sell > no_prob else "hold"
                 else:
-                    net_sell = decision = ""
-                    pnl_pct  = ""
-                yes_bid_raw = no_bid_raw  # use no_bid for the CSV's yes_bid column
-            elif model_prob is not None and yes_bid_raw > 0:
-                fee      = taker_fee(yes_bid_raw)
-                net_sell = yes_bid_raw - fee
-                pnl_pct  = round((yes_bid_raw - entry_price) / entry_price * 100, 2) if entry_price else ""
-                decision = "sell" if net_sell > model_prob else "hold"
+                    net_sell = decision = pnl_pct = ""
             else:
-                net_sell = decision = ""
-                pnl_pct  = ""
+                if model_prob is not None and yes_bid:
+                    fee      = taker_fee(yes_bid)
+                    net_sell = yes_bid - fee
+                    pnl_pct  = round((yes_bid - entry_price) / entry_price * 100, 2) if entry_price else ""
+                    decision = "sell" if net_sell > model_prob else "hold"
+                else:
+                    net_sell = decision = pnl_pct = ""
+
+            def _r(v):
+                return round(v, 4) if isinstance(v, float) else v
+
             rows.append({
                 "ts":               ts,
                 "ticker":           symbol or "",
+                "side":             kalshi_side,
                 "entry_price":      round(entry_price, 4),
-                "entry_bid":        round(entry_bid, 4) if entry_bid != "" else "",
+                "entry_bid":        _r(entry_bid),
                 "entry_spread_pct": entry_spread_pct,
-                "yes_ask":          round(yes_ask, 4) if yes_ask != "" else "",
-                "yes_bid":          round(yes_bid_raw, 4) if yes_bid_raw else "",
+                "yes_ask":          _r(yes_ask),
+                "yes_bid":          _r(yes_bid),
+                "no_ask":           _r(no_ask),
+                "no_bid":           _r(no_bid),
                 "model_prob":       round(model_prob, 4) if model_prob is not None else "",
-                "net_sell":         round(net_sell, 4) if net_sell != "" else "",
+                "net_sell":         _r(net_sell) if net_sell != "" else "",
                 "pnl_pct":          pnl_pct,
                 "decision":         decision,
             })

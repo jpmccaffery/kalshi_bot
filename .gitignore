@@ -11,3 +11,4 @@ demo_output
 output
 *.csv
 *.log
+data/
